@@ -69,17 +69,36 @@ class McpAdapter {
       });
 
       // 解析返回的内容
-      if (result.content && result.content[0]) {
-        const content = result.content[0];
-        if (content.type === 'text') {
+      if (result.content && result.content.length > 0) {
+        // 处理多内容返回（如二维码：文本+图片）
+        const textContents = result.content.filter(c => c.type === 'text');
+        const imageContents = result.content.filter(c => c.type === 'image');
+        
+        // 构建返回对象
+        const response = {};
+        
+        // 处理文本内容
+        if (textContents.length > 0) {
+          const firstText = textContents[0].text;
           try {
-            return JSON.parse(content.text);
+            // 尝试解析为 JSON
+            const parsed = JSON.parse(firstText);
+            Object.assign(response, parsed);
           } catch {
-            return { raw: content.text };
+            // 不是 JSON，使用 raw 字段
+            response.raw = textContents.map(c => c.text).join('\n');
           }
-        } else if (content.type === 'image') {
-          return { image: content.data };
         }
+        
+        // 处理图片内容
+        if (imageContents.length > 0) {
+          response.images = imageContents.map(c => ({
+            mimeType: c.mimeType || 'image/png',
+            data: c.data
+          }));
+        }
+        
+        return response;
       }
 
       return result;
