@@ -5,87 +5,85 @@
  * Checks login status and displays QR code if needed
  */
 
-const MCP_SERVER_URL = process.env.XIAOHONGSHU_MCP_URL || 'http://127.0.0.1:18060/mcp';
+import { execSync } from 'child_process';
+import fs from 'fs';
 
-async function callMCPMethod(method, params = {}) {
-  const response = await fetch(MCP_SERVER_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: Date.now(),
-      method,
-      params,
-    }),
-  });
+const MCP_URL = process.env.XIAOHONGSHU_MCP_URL || 'http://127.0.0.1:18060/mcp';
 
-  const result = await response.json();
-  if (result.error) {
-    throw new Error(result.error.message || 'MCP call failed');
-  }
-  return result.result;
+function runCurl(args) {
+  return execSync(`curl -s ${args}`, { encoding: 'utf-8' });
 }
 
-async function checkLoginStatus() {
+function main() {
   try {
-    const result = await callMCPMethod('tools/call', {
-      name: 'check_login_status',
-      arguments: {},
-    });
-    return JSON.parse(result.content[0].text);
-  } catch (error) {
-    return null;
-  }
-}
+    console.log('Checking Xiaohongshu login status...\n');
 
-async function getLoginQRCode() {
-  const result = await callMCPMethod('tools/call', {
-    name: 'get_login_qrcode',
-    arguments: {},
-  });
-  return JSON.parse(result.content[0].text);
-}
+    // Step 1: Initialize and get session ID
+    const initResponse = runCurl(`-D - ${MCP_URL} -X POST \
+      -H "Content-Type: application/json" \
+      -H "Accept: application/json, text/event-stream" \
+      -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"check-login-skill","version":"1.0"}}}'`);
 
-async function main() {
-  try {
-    console.log('Checking Xiaohongshu login status...');
+    const sessionIdMatch = initResponse.match(/mcp-session-id:\s*(.+)/i);
+    const sessionId = sessionIdMatch ? sessionIdMatch[1].trim() : null;
 
-    const loginStatus = await checkLoginStatus();
+    if (!sessionId) {
+      throw new Error('Failed to get session ID');
+    }
 
-    if (loginStatus && loginStatus.loggedIn) {
-      console.log('Already logged in!');
-      console.log('User info:', JSON.stringify(loginStatus, null, 2));
+    // Step 2: Send initialized notification
+    runCurl(`${MCP_URL} -X POST \
+      -H "Content-Type: application/json" \
+      -H "Mcp-Session-Id: ${sessionId}" \
+      -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'`);
+
+    // Step 3: Check login status
+    const loginResult = runCurl(`${MCP_URL} -X POST \
+      -H "Content-Type: application/json" \
+      -H "Mcp-Session-Id: ${sessionId}" \
+      -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"check_login_status","arguments":{}}}'`);
+
+    const loginData = JSON.parse(loginResult);
+    const loginText = loginData.result?.content?.[0]?.text;
+
+    if (!loginText) {
+      throw new Error('Invalid login response');
+    }
+
+    // Check if logged in by looking for the checkmark
+    if (loginText.includes('✅') && loginText.includes('已登录')) {
+      console.log('✅ 已登录小红书！');
+      console.log(loginText);
       process.exit(0);
     }
 
-    console.log('Not logged in. Getting QR code...');
+    console.log('❌ 未登录小红书，正在获取登录二维码...\n');
 
-    const qrData = await getLoginQRCode();
+    // Step 4: Get QR code
+    const qrResult = runCurl(`${MCP_URL} -X POST \
+      -H "Content-Type: application/json" \
+      -H "Mcp-Session-Id: ${sessionId}" \
+      -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_login_qrcode","arguments":{}}}'`);
 
-    console.log('\n========================================');
-    console.log('Please scan the QR code to login:');
-    console.log('========================================\n');
+    const qrData = JSON.parse(qrResult);
+    const qrContent = JSON.parse(qrData.result.content[0].text);
 
-    if (qrData.qrcode) {
-      // Save QR code to a temporary file
-      const fs = await import('fs');
-      const buffer = Buffer.from(qrData.qrcode, 'base64');
+    if (qrContent.qrcode) {
+      const buffer = Buffer.from(qrContent.qrcode, 'base64');
       const qrPath = '/tmp/xiaohongshu_qrcode.png';
       fs.writeFileSync(qrPath, buffer);
-      console.log(`QR code saved to: ${qrPath}`);
-      console.log('You can open this file to scan the QR code.\n');
+      console.log(`✅ 二维码已保存至: ${qrPath}`);
     }
 
-    if (qrData.expiresIn) {
-      console.log(`QR code expires in ${qrData.expiresIn} seconds.`);
+    if (qrContent.expiresIn) {
+      console.log(`\n⏰ 二维码将在 ${qrContent.expiresIn} 秒后过期。`);
     }
 
-    console.log('\nAfter scanning, please wait a moment and run this command again to verify login.');
+    console.log('\n📱 请使用小红书 APP 扫描二维码登录');
+    console.log('扫描后请重新运行此脚本检查登录状态。');
 
   } catch (error) {
-    console.error('Error:', error.message);
+    console.error('\n❌ 错误:', error.message);
     process.exit(1);
   }
 }

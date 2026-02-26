@@ -2,76 +2,27 @@
 
 /**
  * Xiaohongshu Image/Text Publish Script
- * Publishes image/text content to Xiaohongshu via HTTP API
+ * Publishes image/text content to Xiaohongshu via MCP protocol
  */
 
-const MCP_SERVER_URL = process.env.XIAOHONGSHU_MCP_URL || 'http://127.0.0.1:18060/mcp';
+import { execSync } from 'child_process';
 
-async function callMCPMethod(method, params = {}) {
-  const response = await fetch(MCP_SERVER_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: Date.now(),
-      method,
-      params,
-    }),
-  });
+const MCP_URL = process.env.XIAOHONGSHU_MCP_URL || 'http://127.0.0.1:18060/mcp';
 
-  const result = await response.json();
-  if (result.error) {
-    throw new Error(result.error.message || 'MCP call failed');
-  }
-  return result.result;
+function runCurl(args) {
+  return execSync(`curl -s ${args}`, { encoding: 'utf-8' });
 }
 
-async function checkLoginStatus() {
-  try {
-    const result = await callMCPMethod('tools/call', {
-      name: 'check_login_status',
-      arguments: {},
-    });
-    return JSON.parse(result.content[0].text);
-  } catch (error) {
-    // If not logged in, this is expected
-    return null;
-  }
-}
-
-async function publishImageText(title, content, images, tags = [], scheduleAt = null) {
-  const params = {
-    title,
-    content,
-    images,
-    tags,
-  };
-
-  if (scheduleAt) {
-    params.schedule_at = scheduleAt;
-  }
-
-  const result = await callMCPMethod('tools/call', {
-    name: 'publish_content',
-    arguments: params,
-  });
-
-  return JSON.parse(result.content[0].text);
-}
-
-async function main() {
+function main() {
   try {
     // Read parameters from environment
     const title = process.env.XIAOHONGSHU_TITLE;
     const content = process.env.XIAOHONGSHU_CONTENT;
     const imagesStr = process.env.XIAOHONGSHU_IMAGES || '[]';
     const tagsStr = process.env.XIAOHONGSHU_TAGS || '[]';
-    const scheduleAt = process.env.XIAOHONGSHU_SCHEDULE_AT || null;
 
     if (!title || !content) {
-      console.error('Error: XIAOHONGSHU_TITLE and XIAOHONGSHU_CONTENT are required');
+      console.error('❌ 错误: XIAOHONGSHU_TITLE 和 XIAOHONGSHU_CONTENT 是必需的');
       process.exit(1);
     }
 
@@ -79,29 +30,77 @@ async function main() {
     const tags = JSON.parse(tagsStr);
 
     if (!Array.isArray(images) || images.length === 0) {
-      console.error('Error: At least one image is required');
+      console.error('❌ 错误: 至少需要一张图片');
       process.exit(1);
     }
 
-    // Check login status first
-    console.log('Checking login status...');
-    const loginStatus = await checkLoginStatus();
-    if (!loginStatus) {
-      console.error('Error: Not logged in. Please run /check-login first to login.');
-      process.exit(1);
+    console.log('正在初始化 MCP 会话...\n');
+
+    // Step 1: Initialize and get session ID
+    const initResponse = runCurl(`-D - ${MCP_URL} -X POST \
+      -H "Content-Type: application/json" \
+      -H "Accept: application/json, text/event-stream" \
+      -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"publish-image-text-skill","version":"1.0"}}}'`);
+
+    const sessionIdMatch = initResponse.match(/mcp-session-id:\s*(.+)/i);
+    const sessionId = sessionIdMatch ? sessionIdMatch[1].trim() : null;
+
+    if (!sessionId) {
+      throw new Error('Failed to get session ID');
     }
 
-    console.log('Login status: OK');
+    // Step 2: Send initialized notification
+    runCurl(`${MCP_URL} -X POST \
+      -H "Content-Type: application/json" \
+      -H "Mcp-Session-Id: ${sessionId}" \
+      -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'`);
 
-    // Publish content
-    console.log('Publishing content...');
-    const result = await publishImageText(title, content, images, tags, scheduleAt);
+    // Step 3: Check login status first
+    console.log('检查登录状态...');
+    const loginResult = runCurl(`${MCP_URL} -X POST \
+      -H "Content-Type: application/json" \
+      -H "Mcp-Session-Id: ${sessionId}" \
+      -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"check_login_status","arguments":{}}}'`);
 
-    console.log('Publish successful!');
-    console.log(JSON.stringify(result, null, 2));
+    const loginData = JSON.parse(loginResult);
+    const loginText = loginData.result?.content?.[0]?.text;
+
+    if (!loginText || !loginText.includes('✅')) {
+      console.error('❌ 错误: 未登录。请先运行 check-login-skill 进行登录。');
+      process.exit(1);
+    }
+    console.log('✅ 登录状态: 正常\n');
+
+    // Step 4: Publish content
+    console.log('正在发布内容...');
+    const publishPayload = {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: {
+        name: 'publish_content',
+        arguments: {
+          title,
+          content,
+          images,
+          tags,
+        }
+      }
+    };
+
+    const publishResult = runCurl(`${MCP_URL} -X POST \
+      -H "Content-Type: application/json" \
+      -H "Mcp-Session-Id: ${sessionId}" \
+      -d '${JSON.stringify(publishPayload)}'`);
+
+    const publishData = JSON.parse(publishResult);
+    const publishText = publishData.result?.content?.[0]?.text;
+
+    console.log('✅ 发布成功！');
+    console.log(publishText);
 
   } catch (error) {
-    console.error('Publish failed:', error.message);
+    console.error('\n❌ 发布失败:', error.message);
     process.exit(1);
   }
 }
